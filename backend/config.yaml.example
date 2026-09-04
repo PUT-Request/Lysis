@@ -1,0 +1,364 @@
+server:
+  host: "0.0.0.0"
+  port: 3747
+  static_dir: "frontend/out"
+
+llm:
+  provider: openai
+  api_key: "your-llm-api-key-here"
+  model: qwen3-coder-480b-a35b-instruct
+  endpoint: https://api.vectorengine.ai/v1
+  max_tokens: 4096
+  context_window: 128000
+  max_context_chars: 1000000
+  max_iterations: 100
+  temperature: 0.1
+  max_retries: 3
+
+llm_fallback:
+  provider: openai
+  api_key: "your-llm-api-key-here"
+  model: qwen3-coder-480b-a35b-instruct
+  endpoint: https://api.vectorengine.ai/v1
+  max_tokens: 4096
+  context_window: 128000
+  max_context_chars: 1000000
+  max_iterations: 100
+  temperature: 0.1
+  max_retries: 3
+
+auth:
+  jwt_secret: "your-jwt-secret-here"
+  session_ttl: 24h
+  password_bcrypt_cost: 12
+
+sandbox:
+  temp_dir: /tmp/lysis
+  cleanup_on_complete: true
+  max_disk_usage_gb: 10
+  bwrap_path: /usr/bin/bwrap
+  command_timeout_seconds: 60
+  max_memory_mb: 512
+  tools:
+    - file
+    - xxd
+    - floss
+    - yara
+    - pev
+    - readelf
+    - radare2
+    - nuclei
+    - searchsploit
+    - llvm-objdump
+
+limits:
+  scans_per_day_per_user: 100
+  scans_per_day_per_ip: 50
+  max_parallel_scans: 100
+  max_parallel_scans_per_user: 2
+  max_file_size_mb: 50
+  max_zip_size_mb: 200
+  scan_timeout: "30m"
+
+disk:
+  min_free_bytes: 10737418240
+
+external_apis:
+  virustotal:
+    enabled: true
+    api_key: "your-virustotal-api-key-here"
+    throttle_rpm: 4
+  abusech:
+    enabled: true
+    api_key: "your-abusech-api-key-here"
+
+cache:
+  hash_ttl_hours: 24
+
+prompts:
+  exploit:
+    system_prompt: |
+      You are an expert security researcher analyzing a codebase in an isolated sandbox.
+
+      {{SANDBOX_INSTRUCTIONS}}
+
+      Focus on: injection flaws, auth bypasses, insecure deserialization,
+      hardcoded secrets, path traversal, command injection, XSS, SSRF,
+      and known vulnerable dependency patterns.
+
+      CONTEXT RULES:
+      - Not every finding is a vulnerability. Consider whether the pattern is
+        intentional (loading user tokens from files, CLI args, or env vars)
+        or accidental (a developer's own credentials hardcoded in source).
+      - Bots, CLI tools, and desktop apps loading user credentials from local
+        config files or tokens.txt are expected patterns — do not flag them.
+      - Only flag credentials hardcoded directly in source code, or exposed
+        to network endpoints or logging.
+      - If a credential is loaded from an external file rather than embedded,
+        reduce severity by one level and mention this context in the description.
+      For each finding provide CVE, severity, ease of exploitation, PoC, and remediation.
+
+      CRITICAL OUTPUT RULES:
+      - When your analysis is complete, call the final_result function with the result_json parameter.
+      - The result_json value must be YAML (not JSON). Use the structure shown below.
+      - Do NOT wrap in markdown codeblocks. Raw YAML only.
+      - Indent with 2 spaces. Use null for unknown fields. Quote strings containing special chars.
+      - Do NOT invent fake CVE IDs. Use null if you don't know the exact CVE.
+      - Provide actual executable Proof of Concept code (shell commands, HTTP requests, payload strings), not just descriptions.
+
+      Expected YAML (call final_result with result_json set to YAML matching this):
+      findings:
+        - cve_id: CVE-2024-12345
+          title: SQL Injection in login endpoint
+          severity: critical
+          ease_of_exploitation: easy
+          cve_type: injection
+          file_path: src/login.php
+          line_start: 45
+          line_end: 45
+          vulnerable_code: "SELECT * FROM users WHERE username = '$_POST[username]'"
+          description: The login endpoint concatenates user input directly into SQL queries
+          attack_vector: "POST /login with crafted username parameter containing SQL metacharacters"
+          impact: "Attacker can bypass authentication and access all user accounts"
+          poc: 'curl -X POST http://target/login -d "username=admin'' OR ''1''=''1"'
+          remediation: Use parameterized queries (e.g., PDO prepared statements)
+          confidence: 95
+      risk_score: 85
+      summary: Found 1 vulnerability including a critical SQL injection.
+    result_schema:
+      type: object
+      properties:
+        findings:
+          type: array
+          items:
+            type: object
+            properties:
+              cve_id: { type: string }
+              title: { type: string }
+              severity: { type: string, enum: [critical, high, medium, low] }
+              ease_of_exploitation: { type: string, enum: [easy, medium, hard] }
+              cve_type:
+                {
+                  type: string,
+                  enum:
+                    [injection, xss, auth, crypto, config, dependency, other],
+                }
+              file_path: { type: string }
+              line_start: { type: integer }
+              line_end: { type: integer }
+              vulnerable_code: { type: string }
+              description: { type: string }
+              attack_vector: { type: string }
+              impact: { type: string }
+              poc: { type: string }
+              remediation: { type: string }
+              confidence: { type: integer, minimum: 0, maximum: 100 }
+        risk_score: { type: integer, minimum: 0, maximum: 100 }
+        summary: { type: string }
+
+  malware:
+    system_prompt: |
+      You are an expert Windows malware analyst analyzing binaries in an isolated Linux sandbox.
+      This is standard — most malware analysis is done on Linux. PE (Portable Executable) format
+      is fully decodable without running Windows.
+
+      {{SANDBOX_INSTRUCTIONS}}
+
+      STATIC ANALYSIS ONLY. Do not execute binaries.
+      Map findings to MITRE ATT&CK framework.
+
+      REQUIRED TOOL — ALWAYS start by running:
+        run_shell "/tools/analyze classify /code/<file>"
+      This command detects packers, classifies malware type by import behavior analysis,
+      reports all PE sections with per-section entropy, and lists all DLLs and APIs imported.
+
+      ===== WINDOWS PE ANALYSIS DOMAIN KNOWLEDGE =====
+
+      SECTION NAMES → PACKER DETECTION:
+        UPX0 / UPX1          = UPX packed
+        .aspack / .adata     = ASPack packed
+        .themida             = Themida packed
+        .vmp0 / .vmp1 / .vmp2 = VMProtect packed
+        .nsp0 / .nsp1        = Enigma Protector packed
+
+      IMPORTS → BEHAVIOR CLASSIFICATION:
+        SetWindowsHookEx + GetAsyncKeyState           = keylogging (T1056.001)
+        SetWindowsHookEx + GetAsyncKeyState + GetForegroundWindow = keylogger active window capture
+        WriteProcessMemory + CreateRemoteThread       = process injection (T1055.001)
+        VirtualAllocEx + CreateRemoteThread           = process injection (T1055.001)
+        VirtualAlloc + WriteProcessMemory + CreateRemoteThread = full process injection chain
+        RegSetValueEx + RegCreateKeyEx + GetModuleFileName = registry Run key persistence (T1547.001)
+        socket + connect + send + recv                = raw network C2 (T1071)
+        InternetOpen + InternetReadFile + InternetConnect = HTTP C2 communication (T1071.001)
+        CreateProcess + CreatePipe                    = shell execution via pipe (T1059)
+        CryptEncrypt + CryptDecrypt + FindFirstFile   = ransomware file encryption (T1486)
+        FindFirstFile + FindNextFile + GetFileAttributes = file system traversal and enumeration
+        VirtualAlloc + VirtualProtect                 = memory allocation + page protection changes
+        CreateFile + WriteFile + ReadFile             = file read/write operations
+        OpenClipboard + GetClipboardData              = clipboard monitoring (T1115)
+
+      ARCHITECTURE:
+        0x14c = i386 (32-bit), 0x8664 = x86-64 (64-bit), 0x1c0 = ARM, 0xaa64 = ARM64
+
+      SUBSYSTEM (tells you what type of Windows app it is):
+        2 = GUI (Windows app — typical for malware hiding from console)
+        3 = Console (CMD app — typical for utilities, scripts)
+        1 = Native (driver)
+
+      ENTRY POINT: Normal PE entry points are at small offsets (0x1000-0x2000 range).
+        An entry point at 0xdebe2 or similar high offset = packer stub.
+
+      {{PRESCAN_RESULTS}}
+
+      ===== PRESCANNER =====
+      Every binary below was automatically analyzed by 9 deterministic tools
+      before your session. Results appear above.
+
+      PRESCAN STEPS ALREADY COMPLETED PER FILE:
+        1. SHA-256 hash computed
+        2. MalwareBazaar queried for hash
+        3. VirusTotal queried (fallback if Bazaar misses)
+        4. PE classification — packer, malware class, imports, sections
+        5. PE header — machine, entry point, subsystem
+        6. Overall entropy
+        7. Section-level entropy map
+        8. Printable strings extracted
+        9. Base64-encoded payloads detected
+
+      CRITICAL: Do NOT re-run any of the 9 prescanned tools. Their results
+      are final. Use the data below to synthesize findings.
+
+      WHEN MALWAREBAZAAR RETURNS FOUND:
+        - Verdict MUST be "malicious" with confidence ≥ 85
+        - Use the returned signature as most_likely malware family
+        - This is definitive — MalwareBazaar is a curated malware repository
+
+      You MAY still use read_file, hexdump, grep, run_shell for non-prescanned
+      commands, or other tools for deeper investigation of specific regions.
+
+      Synthesize findings from all available prescan data and call final_result.
+
+      CRITICAL OUTPUT RULES:
+      - When your analysis is complete, call the final_result function with the result_json parameter.
+      - The result_json value must be YAML (not JSON). Use the structure shown below.
+      - Do NOT wrap in markdown codeblocks. Raw YAML only. Indent with 2 spaces.
+      - Do NOT invent fake MITRE ATT&CK IDs or findings. Use null if uncertain.
+      - List each MITRE ATT&CK ID as a separate item in mitre_attack_ids array.
+        Never concatenate multiple IDs into one string.
+        Example: mitre_attack_ids: ["T1055.001", "T1547.001"]
+      - Provide concrete indicators (file hashes, IPs, registry keys, file paths) in every finding, not just descriptions.
+      - Use the malware_class from the classify tool output as the most_likely field.
+      - Include the packer name in the classification string (e.g. "UPX-packed.Trojan.Agent").
+      - One finding per file. Do NOT duplicate findings with the same file path.
+
+      Expected YAML (call final_result with result_json set to YAML matching this):
+      verdict: malicious
+      confidence: 92
+      most_likely: trojan
+      behavioral_timeline:
+        - timestamp: T+0s
+          action: obfuscation
+          description: Packed with UPX, high entropy (7.85) concealing payload
+          file: /code/samples/sample1.exe
+          severity: high
+        - timestamp: T+0s
+          action: process_spawn
+          description: Imports CreateProcess + CreatePipe indicating shell execution
+          file: /code/samples/sample1.exe
+          severity: high
+        - timestamp: T+0s
+          action: network_conn
+          description: socket + connect imports indicate C2 communication to remote host
+          file: /code/samples/sample1.exe
+          severity: critical
+      malicious_registry:
+        - key: HKLM\Software\Microsoft\Windows\CurrentVersion\Run
+          value: malicious.exe
+          action: persistence
+          severity: high
+      findings:
+        - file: /code/samples/sample1.exe
+          classification: UPX-packed.Trojan.Backdoor
+          indicators:
+            - UPX packer detected (sections: UPX0, UPX1)
+            - Overall entropy 7.85 (encrypted/packed)
+            - Imports: CreateProcess, CreatePipe, socket, connect, send
+            - Process injection chain: VirtualAlloc, WriteProcessMemory, CreateRemoteThread
+            - network communication socket + connect
+          mitre_attack_ids:
+            - T1055.001
+            - T1547.001
+          details: 32-bit Windows GUI executable packed with UPX. Import analysis reveals process injection capabilities (VirtualAlloc, WriteProcessMemory, CreateRemoteThread) and network communication (socket, connect). Classified as backdoor with C2 capability.
+      skipped_files: []
+      summary: Packed Windows backdoor with process injection and C2 communication capability.
+    result_schema:
+      type: object
+      properties:
+        verdict: { type: string, enum: [malicious, suspicious, clean] }
+        confidence: { type: integer, minimum: 0, maximum: 100 }
+        most_likely:
+          {
+            type: string,
+            enum:
+              [
+                ransomware,
+                trojan,
+                worm,
+                backdoor,
+                infostealer,
+                dropper,
+                rootkit,
+                benign,
+                unknown,
+              ],
+          }
+        behavioral_timeline:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp: { type: string }
+              action:
+                {
+                  type: string,
+                  enum:
+                    [
+                      file_creation,
+                      registry_write,
+                      network_conn,
+                      process_spawn,
+                      decode,
+                      obfuscation,
+                    ],
+                }
+              description: { type: string }
+              file: { type: string }
+              severity:
+                { type: string, enum: [critical, high, medium, low, info] }
+        malicious_registry:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              value: { type: string }
+              action:
+                { type: string, enum: [persistence, autorun, defense_evasion] }
+              severity: { type: string }
+        findings:
+          type: array
+          items:
+            type: object
+            properties:
+              file: { type: string }
+              classification: { type: string }
+              indicators: { type: array, items: { type: string } }
+              mitre_attack_ids: { type: array, items: { type: string } }
+              details: { type: string }
+        skipped_files:
+          type: array
+          items: { type: string }
+        summary: { type: string }
+
+database:
+  path: data/lysis.db
